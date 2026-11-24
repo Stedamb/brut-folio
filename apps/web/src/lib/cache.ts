@@ -17,6 +17,7 @@ export const pageTags = {
   portfolio: (locale: Locale) => [PORTFOLIO_TAG, LAYOUT_TAG, localeTag(locale)],
   project: (id: number | string, locale: Locale) => [projectTag(id), LAYOUT_TAG, localeTag(locale)],
   info: (locale: Locale) => [LAYOUT_TAG, localeTag(locale)],
+  lab: (locale: Locale) => [LAYOUT_TAG, localeTag(locale)],
 };
 
 export interface PageCache {

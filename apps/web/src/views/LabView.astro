@@ -1,0 +1,36 @@
+---
+import PageLayout from '../layouts/PageLayout.astro';
+import ArrowLink from '../components/ArrowLink.astro';
+import { experiments } from '../lib/lab';
+import { t, type Locale } from '../lib/i18n';
+import type { ProfileView } from '../lib/mappers';
+
+// The route loads the profile and sets the cache headers: Astro only lets pages change the response.
+interface Props {
+  locale: Locale;
+  profile: ProfileView;
+}
+
+const { locale, profile } = Astro.props;
+const strings = t(locale);
+---
+
+<PageLayout title={strings.titles.lab} locale={locale} profile={profile}>
+  <main class="container-min pt-4 pb-16 flex flex-col gap-16">
+    <p class="max-w-2xl">{strings.lab.intro}</p>
+    {
+      experiments.map((experiment) => (
+        <article class="grid gap-6 lg:grid-cols-2 items-center">
+          <a href={experiment.href} class="block overflow-hidden">
+            <img src={experiment.image} alt="" width="1280" height="600" loading="lazy" class="w-full h-auto" />
+          </a>
+          <div class="flex flex-col gap-4">
+            <h2>{experiment.title[locale]}</h2>
+            <p>{experiment.description[locale]}</p>
+            <ArrowLink href={experiment.href} label={strings.lab.open} />
+          </div>
+        </article>
+      ))
+    }
+  </main>
+</PageLayout>

@@ -1,0 +1,10 @@
+---
+import LabView from '../../views/LabView.astro';
+import { getProfile } from '../../lib/payload';
+import { cachePage, pageTags } from '../../lib/cache';
+
+const profile = await getProfile('it');
+cachePage(Astro.cache, pageTags.lab('it'));
+---
+
+<LabView locale="it" profile={profile} />

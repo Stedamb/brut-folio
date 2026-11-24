@@ -4,8 +4,9 @@ export const defaultLocale: Locale = 'it';
 export const isLocale = (value: string): value is Locale => (locales as readonly string[]).includes(value);
 
 export interface Strings {
-  nav: { work: string; info: string; switchLanguage: string };
-  titles: { home: string; portfolio: string; info: string; notFound: string };
+  nav: { work: string; info: string; lab: string; switchLanguage: string };
+  titles: { home: string; portfolio: string; info: string; lab: string; notFound: string };
+  lab: { intro: string; open: string };
   home: { allProjects: string; portfolio: string; getInTouch: string; contacts: string };
   project: { discoverMore: string; close: string };
   contact: { email: string; phone: string; writeToMe: string; call: string; instagram: string };
@@ -19,8 +20,9 @@ export interface Strings {
 
 export const dictionary: Record<Locale, Strings> = {
   it: {
-    nav: { work: 'Work', info: 'Info', switchLanguage: 'English' },
-    titles: { home: 'Home', portfolio: 'Portfolio', info: 'Contatti', notFound: 'Pagina non trovata' },
+    nav: { work: 'Work', info: 'Info', lab: 'Lab', switchLanguage: 'English' },
+    titles: { home: 'Home', portfolio: 'Portfolio', info: 'Contatti', lab: 'Lab', notFound: 'Pagina non trovata' },
+    lab: { intro: 'Esperimenti: idee provate, a volte finite in homepage, a volte rimaste qui.', open: 'Apri' },
     home: { allProjects: 'Guarda tutti i progetti', portfolio: 'Portfolio', getInTouch: 'Contattami', contacts: 'Contatti' },
     project: { discoverMore: 'Scopri di più', close: 'Chiudi' },
     contact: { email: 'E-mail', phone: 'Telefono', writeToMe: 'Scrivimi', call: 'Chiama', instagram: 'Instagram' },
@@ -41,8 +43,9 @@ export const dictionary: Record<Locale, Strings> = {
     portrait: (name) => `Ritratto di ${name}`,
   },
   en: {
-    nav: { work: 'Work', info: 'Info', switchLanguage: 'Italiano' },
-    titles: { home: 'Home', portfolio: 'Portfolio', info: 'Contact', notFound: 'Page not found' },
+    nav: { work: 'Work', info: 'Info', lab: 'Lab', switchLanguage: 'Italiano' },
+    titles: { home: 'Home', portfolio: 'Portfolio', info: 'Contact', lab: 'Lab', notFound: 'Page not found' },
+    lab: { intro: 'Experiments: ideas tried out, some of which ended up on the homepage, some of which stayed here.', open: 'Open' },
     home: { allProjects: 'See all projects', portfolio: 'Portfolio', getInTouch: 'Get in touch', contacts: 'Contact' },
     project: { discoverMore: 'Discover more', close: 'Close' },
     contact: { email: 'E-mail', phone: 'Phone', writeToMe: 'Write to me', call: 'Call', instagram: 'Instagram' },
