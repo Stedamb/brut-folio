@@ -413,7 +413,7 @@ function buildAtlas() {
 }
 const asciiFrag = /* glsl */`
 precision highp float;
-uniform sampler2D uScene, uAtlas; uniform vec2 uGrid; uniform float uTime, uN; uniform vec3 uPaper;
+uniform sampler2D uScene, uAtlas; uniform vec2 uGrid; uniform float uTime, uN; uniform vec3 uPaper; uniform float uLightMode;
 in vec2 vUv; out vec4 outColor;
 float h21(vec2 p){ return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453); }
 float vn(vec2 p){ vec2 i=floor(p),f=fract(p); f=f*f*(3.-2.*f); return mix(mix(h21(i),h21(i+vec2(1,0)),f.x),mix(h21(i+vec2(0,1)),h21(i+vec2(1,1)),f.x),f.y); }
@@ -481,8 +481,18 @@ void main(){
   vec2 gv = g-cell, dx = dFdx(g), dy = dFdy(g);
   float ink = smoothstep(.12,.78,textureGrad(uAtlas,vec2((gl+gv.x)/uN,1.-gv.y),dx/uN,dy).r);
   vec3 blur = grade(textureLod(uScene,vUv,lodC+1.2).rgb);
-  float bg = cls>4.5 && cls<5.5 ? .34 : .22;                       // big bright paving stays light
-  outColor = vec4(mix(blur*bg,col*1.32+.012,ink),1.);
+  if(uLightMode>.5){
+    // Light mode: each cell is painted in the scene's own colour, lifted and saturated, and its
+    // glyph prints in a deeper shade of the same hue, like coloured type on tinted paper.
+    float l = lum(col);
+    vec3 vivid = clamp(mix(vec3(l),col,1.35),0.,1.);
+    vec3 cellBg = mix(vivid,vec3(1.),.18)*1.08+.04;
+    vec3 glyph = vivid*vivid*.62;
+    outColor = vec4(mix(mix(cellBg,blur*1.1+.06,.35),glyph,ink*.95),1.);
+  } else {
+    float bg = cls>4.5 && cls<5.5 ? .42 : .3;                       // big bright paving stays light
+    outColor = vec4(mix(blur*bg,col*1.4+.02,ink),1.);
+  }
 }`;
 const tiltFrag = /* glsl */`
 precision highp float;
@@ -542,7 +552,7 @@ export async function initDiorama(host) {
   const atlas = buildAtlas();
   const vtx = `in vec3 position; in vec2 uv; out vec2 vUv; void main(){ vUv = uv; gl_Position = vec4(position.xy,0.,1.); }`;
   const ascii = new THREE.RawShaderMaterial({ glslVersion: THREE.GLSL3, vertexShader: vtx, fragmentShader: asciiFrag, depthTest: false, depthWrite: false,
-    uniforms: { uScene: { value: null }, uAtlas: { value: atlas }, uGrid: { value: new THREE.Vector2() }, uTime: time, uN: { value: GLYPHS.length }, uPaper: { value: new THREE.Vector3(0.96, 0.96, 0.96) } } });
+    uniforms: { uScene: { value: null }, uAtlas: { value: atlas }, uGrid: { value: new THREE.Vector2() }, uTime: time, uN: { value: GLYPHS.length }, uPaper: { value: new THREE.Vector3(0.96, 0.96, 0.96) }, uLightMode: { value: 1 } } });
   const tilt = new THREE.RawShaderMaterial({ glslVersion: THREE.GLSL3, vertexShader: vtx, fragmentShader: tiltFrag, depthTest: false, depthWrite: false,
     uniforms: { uA: { value: null }, uRes: { value: new THREE.Vector2() } } });
   const quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), ascii); quad.frustumCulled = false;
@@ -569,6 +579,7 @@ export async function initDiorama(host) {
   const params = new URLSearchParams(location.search);
   const hour = params.get('hour');
   const raw = params.has('raw'); // the 3D scene without glyphs, for building it
+  ascii.uniforms.uLightMode.value = params.has('light') ? 1 : 0; // glyphs on dark by default; ?light for coloured cells on light
   const now = () => (hour !== null && Number(hour) >= 0 && Number(hour) <= 24 ? berlinTime(Number(hour)) : new Date());
   function light() {
     const clock = skyClock(now());
