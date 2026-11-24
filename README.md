@@ -11,7 +11,7 @@ A photography portfolio built with [Payload CMS](https://payloadcms.com) and [As
 
 The public site is plain Astro with no UI framework: server-rendered pages, cached on the CDN and purged by tag when content is published. The homepage hero is an ASCII skyline (a brutalist block and Berlin's TV tower) drawn by a WebGL shader. The admin and API live in a separate Payload app.
 
-**Live site:** https://minimal-portfolio-murex-one.vercel.app | **Admin:** https://minimal-portfolio-cms.vercel.app/admin
+**Live site:** https://brut-folio.vercel.app | **Admin:** https://minimal-portfolio-cms.vercel.app/admin
 
 <video src="docs/media/editing-demo.webm" controls muted width="800"></video>
 
