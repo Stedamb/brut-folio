@@ -12,6 +12,16 @@ export interface Experiment {
 // Newest first.
 export const experiments: Experiment[] = [
   {
+    href: '/lab/walk',
+    image: '/lab/berlin-walk.jpg',
+    date: '2026-11',
+    title: { it: 'Passeggiata a Berlino', en: 'A walk in Berlin' },
+    description: {
+      it: 'La stessa Berlino in miniatura, ma a piedi e sempre in ASCII: il lungofiume della Sprea, il Lustgarten, il Duomo e la Fernsehturm ad altezza d’occhio. WASD o frecce per camminare, mouse per guardarsi intorno, R per vedere il 3D che c’è sotto.',
+      en: 'The same miniature Berlin, on foot and still in ASCII: the Spree’s promenade, the Lustgarten, the Dom and the Fernsehturm at eye level. WASD or arrows to walk, the mouse to look around, R to see the 3D underneath.',
+    },
+  },
+  {
     href: '/lab/diorama',
     image: '/lab/berlin-diorama.jpg',
     date: '2026-11',

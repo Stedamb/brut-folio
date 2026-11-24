@@ -1,0 +1,86 @@
+---
+// Lab experiment: a walk through the Berlin diorama at eye level, still printed as ASCII.
+// Listed on /lab; a full-screen page of its own, with a way back.
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="A walk through Berlin in ASCII: the Spree, the Dom and the Fernsehturm at eye level." />
+    <title>A walk in Berlin | Lab</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: #050505;
+        overflow: hidden;
+      }
+      [data-walk] {
+        position: fixed;
+        inset: 0;
+      }
+      .back,
+      .hint {
+        position: fixed;
+        z-index: 1;
+        padding: 4px 8px;
+        font: 13px/1.4 ui-monospace, Menlo, Consolas, monospace;
+        color: #f5f5f5;
+        background: rgb(5 5 5 / 0.6);
+      }
+      .back {
+        top: 16px;
+        left: 16px;
+        text-decoration: none;
+      }
+      .back:hover {
+        text-decoration: underline;
+      }
+      .hint {
+        bottom: 16px;
+        left: 50%;
+        transform: translateX(-50%);
+        text-align: center;
+        transition: opacity 1s;
+        pointer-events: none;
+      }
+      .hint.gone {
+        opacity: 0;
+      }
+      .touch {
+        display: none;
+      }
+      @media (pointer: coarse) {
+        .touch {
+          display: inline;
+        }
+        .mouse {
+          display: none;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <a class="back" href="/lab">&larr; Lab</a>
+    <div data-walk></div>
+    <p class="hint" data-hint>
+      <span class="mouse">click to look around &middot; WASD or arrows to walk &middot; Shift to hurry &middot; R for 3D</span>
+      <span class="touch">drag left to walk &middot; drag right to look</span>
+    </p>
+    <script>
+      import { initWalk } from '../../scripts/diorama/walk.js';
+
+      const host = document.querySelector<HTMLElement>('[data-walk]');
+      if (host) initWalk(host).catch((error) => console.error('[walk]', error));
+      // The controls fade once someone starts moving, or after a while.
+      const hint = document.querySelector('[data-hint]');
+      const hide = () => hint?.classList.add('gone');
+      setTimeout(hide, 12000);
+      addEventListener('keydown', () => setTimeout(hide, 2500), { once: true });
+      addEventListener('touchstart', () => setTimeout(hide, 2500), { once: true });
+    </script>
+  </body>
+</html>
