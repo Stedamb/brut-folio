@@ -1,5 +1,5 @@
-// Berlin in miniature: the city, its light and everything that moves in it, shared by the
-// Lab's diorama (seen from high above) and walk (seen at eye level). Units are about 1.9 m:
+// Berlin 3D: the city, its light and everything that moves in it, seen from high above or
+// at eye level. Units are about 1.9 m:
 // a person is just under one unit tall.
 //
 // The Spree runs diagonally through the city. The Fernsehturm stands on the near bank, the
@@ -270,7 +270,7 @@ function buildFernsehturm(scene) {
   const sg = mergeGeometries(steel); sg.computeVertexNormals();
   const a = new THREE.Mesh(cg, tag(new THREE.MeshLambertMaterial({ vertexColors: true }), CLS.tower));
   const b = new THREE.Mesh(sg, tag(new THREE.MeshLambertMaterial({ vertexColors: true }), CLS.metal));
-  // Drawn 1.6 times the scale of the city around it, so it rises over the miniature as it does over Berlin.
+  // Drawn 1.6 times the scale of the city around it, so it rises over the city as it does over Berlin.
   for (const m of [a, b]) { m.position.set(TOWER.x, 0, TOWER.z); m.scale.setScalar(1.6); m.castShadow = true; m.receiveShadow = true; scene.add(m); }
 }
 
@@ -318,16 +318,18 @@ function facadeWindows(s) {
     .replace('#include <emissivemap_fragment>', '#include <emissivemap_fragment>\n totalEmissiveRadiance += vec3(1., .78, .45) * glow * 1.4;');
 }
 
-// Berlin blocks: cream and grey plaster, with zinc and tile roofs; a few Plattenbau. Walking,
-// they stand at their real five or six storeys; from above, lower, so the city stays legible.
-function buildBlocks(scene, tall) {
+// Berlin blocks: cream and grey plaster, with zinc and tile roofs; a few Plattenbau. Three to
+// five storeys: tall enough to feel like streets when walking, low enough that the view from above
+// still sees the river and the landmarks over them.
+const STOREYS = 2.0;
+function buildBlocks(scene) {
   const walls = [], roofs = [];
   const tones = ['#e4d9c3', '#d6cbb5', '#cfc6b8', '#e8dfcf', '#c9bba3', '#b9b4ab'];
   const roofTones = ['#9a5a43', '#7c7f84', '#8c4b38', '#6d7177', '#a76a4c'];
   for (let gz = Z0 + 3; gz < Z1 - 2; gz += 6.4) for (let gx = X0 + 3; gx < X1 - 2; gx += 6.4) {
     const x = gx + (rnd() - 0.5) * 1.4, z = gz + (rnd() - 0.5) * 1.4;
     if (riverD(x, z) < RIVER_HALF + 6.5 || streetD(x, z) < 5 || park(x, z) || plaza(x, z) || Math.hypot(x - DOM.x, z - DOM.z) < 9.5 || lustgarten(x, z)) continue;
-    const plattenbau = rnd() < 0.12, w = 4.4 + rnd() * 1.2, d = 4.2 + rnd() * 1.2, h = (plattenbau ? 5.5 + rnd() * 2 : 2.6 + rnd() * 1.4) * (tall ? 2.6 : 1);
+    const plattenbau = rnd() < 0.12, w = 4.4 + rnd() * 1.2, d = 4.2 + rnd() * 1.2, h = (plattenbau ? 5.5 + rnd() * 2 : 2.6 + rnd() * 1.4) * STOREYS;
     const a = rnd() * 0.12 - 0.06;
     obstacles.push({ x, z, c: Math.cos(a), s: Math.sin(a), hw: w / 2, hd: d / 2 });
     const wall = new THREE.BoxGeometry(w, h, d); wall.rotateY(a); walls.push(part(wall, plattenbau ? '#c4c2bc' : tones[(rnd() * tones.length) | 0], x, h / 2, z));
@@ -460,11 +462,11 @@ export function blocked(x, z, r = 0.3) {
 }
 
 /**
- * Builds Berlin into the scene. `tall` raises the blocks to street-level proportions.
+ * Builds Berlin into the scene: the same city from above and on foot.
  * Returns the sun, `light(clock, focus)` to set Berlin's light around a point, and
  * `update(t)` to move the tram, the boat, the walkers and the falling leaves.
  */
-export function createBerlin(scene, { tall = false } = {}) {
+export function createBerlin(scene) {
   const sun = new THREE.DirectionalLight('#ffe7c4', 3.2);
   sun.castShadow = true; sun.shadow.mapSize.set(4096, 4096);
   Object.assign(sun.shadow.camera, { left: -60, right: 60, top: 60, bottom: -60, near: 5, far: 220 });
@@ -474,12 +476,12 @@ export function createBerlin(scene, { tall = false } = {}) {
 
   scene.add(buildGround(), buildRiver());
   buildGrass(scene); buildFlowers(scene); buildTrees(scene);
-  buildFernsehturm(scene); buildDom(scene); buildBlocks(scene, tall); buildEmbankment(scene); buildLamps(scene); buildBenches(scene);
+  buildFernsehturm(scene); buildDom(scene); buildBlocks(scene); buildEmbankment(scene); buildLamps(scene); buildBenches(scene);
   posts.push({ x: TOWER.x, z: TOWER.z, r: 7.4 });                                         // the pavilion
   obstacles.push({ x: DOM.x, z: DOM.z + 0.3, c: Math.cos(0.12), s: Math.sin(0.12), hw: 4.8, hd: 4.3 });
   const tram = buildTram(); scene.add(tram);
   const boat = buildBoat(); scene.add(boat);
-  const { im: people, walkers } = buildPeople(scene, tall ? 40 : 14);
+  const { im: people, walkers } = buildPeople(scene, 30);
 
   // Falling lime leaves, around wherever the light is focused.
   const fall = new THREE.InstancedMesh(new THREE.PlaneGeometry(0.12, 0.1), tag(new THREE.MeshBasicMaterial({ color: new THREE.Color(1.4, 1.0, 0.35), side: THREE.DoubleSide }), CLS.flower), 160);

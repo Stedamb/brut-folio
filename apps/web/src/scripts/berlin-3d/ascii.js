@@ -1,6 +1,6 @@
 // The ASCII pass shared by the Lab's Berlin pages: each glyph cell takes its colour from the
 // 3D render and its character from the surface class (in alpha), its brightness and the
-// direction of its edges; then, for the diorama, a tilt-shift blur.
+// direction of its edges; then, seen from above, a tilt-shift blur.
 
 import * as THREE from 'three';
 
@@ -103,11 +103,11 @@ void main(){
 }`;
 export const tiltFrag = /* glsl */`
 precision highp float;
-uniform sampler2D uA; uniform vec2 uRes;
+uniform sampler2D uA; uniform vec2 uRes; uniform float uScale, uStrength;
 in vec2 vUv; out vec4 outColor;
 void main(){
   float dy = abs(vUv.y-.46);
-  float r = pow(smoothstep(.25,.6,dy),1.6)*28.;
+  float r = pow(smoothstep(.25,.6,dy),1.6)*28.*uScale*uStrength;   // uStrength fades it out at street level
   if(r<.2){ outColor = vec4(texture(uA,vUv).rgb,1.); return; }
   vec3 c = vec3(0.);
   float lod = max(log2(r/4.),0.);
