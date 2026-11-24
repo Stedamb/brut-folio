@@ -198,12 +198,30 @@ float treesSdf(vec3 p) {
   return min(sdCyl(c, 0.6, 0.0, 7.5), crown);
 }
 
-// A tram crossing the foreground, every 58 seconds.
+// Two trams on a street that runs away from the viewer through a gap in the lime trees, one
+// on each track: one comes from behind the camera and heads off towards the Dom, the other
+// comes back. Each takes 40 seconds.
+float TRAM_X;
+const float TRAM_NEAR = 20.0, TRAM_FAR = -250.0;
+float oneTram(vec3 q) {
+  float d = sdBox(q - vec3(0.0, 2.2, 0.0), vec3(1.3, 1.8, 14.0)) - 0.2;
+  return min(d, sdBox(q - vec3(0.0, 4.3, 0.0), vec3(0.5, 0.2, 1.6)));           // pantograph
+}
 float tramSdf(vec3 p) {
-  vec3 q = p - vec3(mod(uTime * 9.0, 520.0) - 260.0, 0.0, -70.0);
-  float d = sdBox(q - vec3(0.0, 2.2, 0.0), vec3(14.0, 1.8, 1.3)) - 0.2;
-  d = min(d, sdBox(q - vec3(0.0, 4.3, 0.0), vec3(1.6, 0.2, 0.5)));              // pantograph
-  return d;
+  float span = TRAM_NEAR - TRAM_FAR;
+  float bound = sdBox(p - vec3(TRAM_X, 2.5, (TRAM_NEAR + TRAM_FAR) * 0.5), vec3(4.0, 3.0, span * 0.5 + 15.0));
+  if (bound > 3.0) return bound;
+  float away = TRAM_NEAR - fract(uTime / 40.0) * span;
+  float back = TRAM_FAR + fract(uTime / 40.0 + 0.5) * span;
+  return min(oneTram(p - vec3(TRAM_X - 1.8, 0.0, away)), oneTram(p - vec3(TRAM_X + 1.8, 0.0, back)));
+}
+
+// The tracks: four rails converging towards the horizon, on a slightly darker street.
+float tracks(vec3 p) {
+  if (p.z > 0.0 || p.z < TRAM_FAR - 10.0) return 0.0;
+  float dx = abs(p.x - TRAM_X);
+  float rails = step(abs(abs(dx - 1.8) - 0.72), 0.16);
+  return 0.08 * step(dx, 4.2) + 0.4 * rails * step(dx, 3.0);
 }
 
 // Materials: 1 ground, 2 tower, 3 gate, 4 Quadriga, 5 Dom, 6 tall slab, 7 low slab,
@@ -346,6 +364,7 @@ void main() {
   LOW = vec3(50.0 * k, 0.0, -95.0);
   TREES = vec3(uSolo > 0.5 ? 0.0 : -5.0 * k, 0.0, -175.0);
   TREE_SPACING = 16.0 * k;
+  TRAM_X = uSolo > 0.5 ? -8.0 : -13.0 * k;                       // between two lime trees
 
   // Camera: the cursor turns and shifts it a little; it also drifts on its own.
   float yaw = (uMouse.x - 0.5) * 0.05 + 0.012 * sin(t * 0.05);
@@ -370,7 +389,7 @@ void main() {
     float sh = softShadow(p + n * 0.3, uLight);
     if (hit.y < 1.5) {
       // The ground stays paper; only the shadows the landmarks cast on it print.
-      lum = 1.0 - 0.45 * (1.0 - sh) * mix(0.6, 1.0, day);
+      lum = 1.0 - 0.45 * (1.0 - sh) * mix(0.6, 1.0, day) - tracks(p);
     } else {
       // Solid volumes shaded by how they face the light, as dense glyphs: every surface
       // prints something, the lit side light, the far side dense.
