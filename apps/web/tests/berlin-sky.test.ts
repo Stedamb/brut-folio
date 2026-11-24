@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { berlinTime, moonPhase, parseWeather, skyClock, skyWeather, sunPosition } from '../src/lib/berlin-sky';
+import { berlinTime, lightDirection, moonPhase, parseWeather, skyClock, skyWeather, sunPosition } from '../src/lib/berlin-sky';
 import { GET } from '../src/pages/api/berlin-weather';
 
 describe('sunPosition', () => {
@@ -27,7 +27,8 @@ describe('skyClock', () => {
     expect(clock.day).toBe(1);
     expect(clock.sun[0]).toBeCloseTo(0.37, 1);
     expect(clock.sun[1]).toBeGreaterThan(0.8);
-    expect(clock.lightX).toBeCloseTo(clock.sun[0]);
+    expect(clock.light[0]).toBeLessThan(0); // from the left: the midday sun is east of the view
+    expect(clock.light[1]).toBeGreaterThan(0.7);
   });
 
   it('is night at midnight, with the moon up instead', () => {
@@ -35,7 +36,8 @@ describe('skyClock', () => {
     expect(clock.day).toBe(0);
     expect(clock.sun[1]).toBeLessThan(0);
     expect(clock.moon[1]).toBeGreaterThan(0.7);
-    expect(clock.lightX).toBeCloseTo(clock.moon[0]);
+    expect(Math.hypot(...clock.light)).toBeCloseTo(1);
+    expect(clock.light[1]).toBeGreaterThan(0.3); // the moon, high
   });
 
   it('keeps the moon above the rooftops right after sunset', () => {
@@ -47,6 +49,21 @@ describe('skyClock', () => {
     expect(clock.day).toBeGreaterThan(0.2);
     expect(clock.day).toBeLessThan(0.8);
     expect(clock.sun[0]).toBeGreaterThan(0.6);
+  });
+});
+
+describe('lightDirection', () => {
+  it('lights from the left in the morning and the right in the afternoon, from the viewer\'s side', () => {
+    const morning = lightDirection(120, 10);
+    const afternoon = lightDirection(240, 10);
+    expect(morning[0]).toBeLessThan(-0.5);
+    expect(afternoon[0]).toBeGreaterThan(0.3);
+    expect(morning[2]).toBeGreaterThan(0);
+    expect(Math.hypot(...morning)).toBeCloseTo(1);
+  });
+
+  it('never lights from below the horizon', () => {
+    expect(lightDirection(180, -30)[1]).toBeGreaterThan(0.05);
   });
 });
 

@@ -1,10 +1,16 @@
-// Homepage hero: a Berlin skyline (the Brandenburger Tor, the Dom, the Fernsehturm and two
-// Plattenbau slabs; on portrait screens the Fernsehturm alone), drawn by a WebGL
-// fragment shader and printed as ASCII. Each character cell samples the scene once and
-// picks a glyph from an atlas by darkness. The sky follows Berlin: the sun or moon where
-// the hour puts it, lit windows at night, and the current clouds, rain, snow, fog or storm
-// from /api/berlin-weather. The cursor nudges the light.
-// `?weather=<WMO code>&hour=<0-24>` on the page overrides both, to preview a sky.
+// Homepage hero: a 3D Berlin skyline printed as ASCII. The Brandenburger Tor with its
+// Quadriga, the Dom, the Fernsehturm and two Plattenbau slabs are signed distance fields,
+// raymarched in WebGL; on portrait screens the Fernsehturm stands alone, centred.
+//
+// Two passes. The scene pass renders one ray per quarter character cell into a small texture.
+// The print pass averages each cell, picks a glyph by darkness and lays rain and snow on top.
+// The landmarks are solid volumes shaded only by glyph density, no outlines or textures.
+//
+// The light follows Berlin: the sun's real direction by day, casting shadows across the
+// skyline, the moon by night with lit windows. The sky stays paper, with the sun, the moon
+// in its real phase, stars and the current clouds from /api/berlin-weather; rain, snow, fog
+// and storms come from the same reading, and snow settles on every roof. The cursor moves
+// the camera. `?weather=<WMO code>&hour=<0-24>` on the page previews any sky.
 // Without WebGL the CMS hero media is shown instead. With reduced motion it draws still frames.
 // Idempotent, so a live-preview swap can call it again.
 
@@ -19,8 +25,12 @@ import {
 } from '../lib/berlin-sky';
 
 const RAMP = ' .,:;-=+*#%@'; // from light to dark
-const EXTRA = '|\\*'; // rain, slanted rain, snow
-const CELL_CSS_PX = 9;
+const EXTRA = '|\\*/'; // rain and edges, slanted rain and edges, snow, edges
+// Glyph families, light to dark, six each: stone, concrete, metal, leaves, the tram.
+const FAMILIES = '.-=#%@' + '.:;+#@' + '.:oO0@' + '.:+*o%' + ':=$&#@';
+const CELL_CSS_PX = 7;
+const SUPERSAMPLE = 2; // scene rays per cell, per axis
+const SOLO_BELOW_ASPECT = 1.1; // narrower than this, the Fernsehturm stands alone
 const INK = [0x09 / 255, 0x09 / 255, 0x09 / 255]; // --text
 const PAPER = [0xf5 / 255, 0xf5 / 255, 0xf5 / 255]; // --background
 const WEATHER_REFRESH_MS = 15 * 60 * 1000;
@@ -30,29 +40,11 @@ attribute vec2 aPos;
 void main() { gl_Position = vec4(aPos, 0.0, 1.0); }
 `;
 
-const FRAGMENT = `
+const COMMON = `
 precision highp float;
-uniform vec2 uRes;
 uniform float uTime;
-uniform vec2 uMouse;
-uniform float uCell;
-uniform float uGlyphs;
-uniform float uAtlasGlyphs;
-uniform sampler2D uAtlas;
-uniform vec3 uInk;
-uniform vec3 uPaper;
-// Time of day.
-uniform float uDay;
-uniform vec2 uSun;
-uniform vec2 uMoon;
-uniform float uMoonPhase;
-uniform float uLightX;
-// Weather.
-uniform float uClouds;
 uniform float uRain;
 uniform float uSnow;
-uniform float uFog;
-uniform float uStorm;
 uniform float uWind;
 
 float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
@@ -61,44 +53,263 @@ float noise(vec2 p) {
   vec2 u = f * f * (3.0 - 2.0 * f);
   return mix(mix(hash(i), hash(i + vec2(1, 0)), u.x), mix(hash(i + vec2(0, 1)), hash(i + vec2(1, 1)), u.x), u.y);
 }
+`;
+
+// The scene pass: one ray per fragment of a texture SUPERSAMPLE times the character grid.
+const SCENE = `${COMMON}
+uniform vec2 uRes;        // canvas size in pixels
+uniform float uCell;      // character cell in pixels
+uniform float uSS;        // rays per cell, per axis
+uniform vec2 uMouse;
+uniform float uSolo;
+// Time of day.
+uniform float uDay;
+uniform vec2 uSun;
+uniform vec2 uMoon;
+uniform float uMoonPhase;
+uniform vec3 uLight;
+// Weather.
+uniform float uClouds;
+uniform float uFog;
+uniform float uStorm;
+
+// Landmark positions in metres, set per frame from the aspect ratio. The camera stands at
+// the origin, 5 m up, looking down -z; x is to the right.
+vec3 GATE, DOM, TOWER, SLAB, LOW;
+
 float fbm(vec2 p) {
   float v = 0.0, a = 0.5;
   for (int i = 0; i < 4; i++) { v += a * noise(p); p *= 2.03; a *= 0.5; }
   return v;
 }
-float box(vec2 p, vec2 lo, vec2 hi) { return step(lo.x, p.x) * step(p.x, hi.x) * step(lo.y, p.y) * step(p.y, hi.y); }
 
-// Prefab facade: floor slabs, recessed windows, lit ones that change slowly; more at night.
-float facade(vec2 p, vec2 grid, float base, float seed, float shade) {
-  vec2 g = p * grid;
-  vec2 f = fract(g);
-  vec2 id = floor(g);
-  float lum = base + 0.1 * (noise(p * 60.0) - 0.5);
-  if (f.y < 0.18) return (base + 0.25) * shade;               // slab edge
-  if (f.x > 0.18 && f.x < 0.82 && f.y > 0.32) {
-    float lit = step(mix(0.62, 0.9, uDay), hash(id + seed + floor(uTime * 0.15 + hash(id) * 7.0)));
-    return mix(0.04, 0.95, lit);                              // window
-  }
-  return lum * shade;
+// --- Distance functions -------------------------------------------------------------------
+
+float sdBox(vec3 p, vec3 b) {
+  vec3 q = abs(p) - b;
+  return length(max(q, 0.0)) + min(max(q.x, max(q.y, q.z)), 0.0);
+}
+// A vertical cylinder of radius r between heights y0 and y1.
+float sdCyl(vec3 p, float r, float y0, float y1) {
+  vec2 d = vec2(length(p.xz) - r, max(y0 - p.y, p.y - y1));
+  return min(max(d.x, d.y), 0.0) + length(max(d, 0.0));
+}
+float sdEll(vec3 p, vec3 r) {
+  float k0 = length(p / r);
+  float k1 = length(p / (r * r));
+  return k0 * (k0 - 1.0) / k1;
+}
+// A ring standing upright, facing the camera.
+float sdRing(vec3 p, float radius, float thickness) {
+  return length(vec2(length(p.xy) - radius, p.z)) - thickness;
 }
 
-float sky(vec2 p, vec2 m, float aspect, float t) {
-  // The sky itself is always paper, day or night; only what is in it prints.
+// Brandenburger Tor: plinth, two rows of six Doric columns, entablature, stepped attic, wings.
+float gateSdf(vec3 q) {
+  float bound = sdBox(q - vec3(0.0, 12.5, 0.0), vec3(36.0, 13.0, 8.0));
+  if (bound > 4.0) return bound;
+  float d = sdBox(q - vec3(0.0, 0.75, 0.0), vec3(24.0, 0.75, 6.5));
+  float i = clamp(floor((q.x + 17.5) / 7.0 + 0.5), 0.0, 5.0);
+  vec3 c = q - vec3(-17.5 + 7.0 * i, 0.0, 0.0);
+  c.z = abs(c.z) - 4.0;
+  d = min(d, sdCyl(c, 1.4, 1.5, 15.0));
+  d = min(d, sdBox(c - vec3(0.0, 14.6, 0.0), vec3(1.9, 0.45, 1.9)));          // capitals
+  d = min(d, sdBox(q - vec3(0.0, 17.5, 0.0), vec3(23.0, 2.5, 6.2)));          // entablature
+  d = min(d, sdBox(q - vec3(0.0, 21.5, 0.0), vec3(13.0, 1.5, 5.0)));          // attic
+  d = min(d, sdBox(q - vec3(0.0, 23.3, 0.0), vec3(9.5, 0.35, 4.2)));
+  vec3 w = vec3(abs(q.x) - 30.0, q.y, q.z + 1.0);                             // wings
+  d = min(d, sdBox(w - vec3(0.0, 6.0, 0.0), vec3(5.5, 6.0, 5.5)));
+  d = min(d, sdBox(w - vec3(0.0, 12.4, 0.0), vec3(6.0, 0.45, 6.0)));
+  return d;
+}
+
+// The Quadriga on top of the gate, drawn 1.6 times life size so it survives as ASCII:
+// four horses with raised heads, the chariot, Victoria with her wings, staff and wreath.
+float quadrigaSdf(vec3 q) {
+  vec3 h = (q - vec3(0.0, 23.6, 0.5)) / 1.6;
+  float bound = sdBox(h - vec3(0.0, 4.5, -0.5), vec3(6.5, 5.0, 3.5));
+  if (bound > 2.0) return bound * 1.6;
+  float i = clamp(floor((h.x + 4.5) / 3.0 + 0.5), 0.0, 3.0);
+  vec3 o = h - vec3(-4.5 + 3.0 * i, 0.0, 0.0);
+  float d = sdEll(o - vec3(0.0, 2.2, 0.0), vec3(0.8, 1.0, 2.0));               // body
+  d = min(d, sdEll(o - vec3(0.0, 3.6, 1.7), vec3(0.45, 1.3, 0.55)));            // neck and head
+  d = min(d, sdBox(o - vec3(0.0, 0.7, 0.0), vec3(0.5, 0.7, 1.5)));              // legs
+  d = min(d, sdBox(h - vec3(0.0, 1.6, -2.4), vec3(2.0, 1.4, 0.9)));             // chariot
+  d = min(d, sdCyl(h - vec3(0.0, 0.0, -2.4), 0.65, 2.5, 6.2));                  // Victoria
+  d = min(d, sdBox(h - vec3(0.0, 5.4, -2.6), vec3(2.3, 0.4, 0.25)));            // wings
+  d = min(d, sdCyl(h - vec3(1.5, 0.0, -2.2), 0.22, 3.0, 8.0));                  // staff
+  d = min(d, sdRing(h - vec3(1.5, 8.7, -2.2), 0.8, 0.22));                      // wreath
+  return d * 1.6;
+}
+
+// Berliner Dom: the hall with its portico, four corner towers, the drum, the ribbed dome,
+// the lantern and the cross.
+float domSdf(vec3 q) {
+  float bound = sdBox(q - vec3(0.0, 45.0, 1.0), vec3(37.0, 46.0, 33.0));
+  if (bound > 4.0) return bound;
+  float d = sdBox(q - vec3(0.0, 15.0, 0.0), vec3(34.0, 15.0, 28.0));
+  d = min(d, sdBox(q - vec3(0.0, 30.6, 0.0), vec3(35.0, 0.9, 29.0)));          // cornice
+  d = min(d, sdBox(q - vec3(0.0, 18.0, 28.5), vec3(13.0, 18.0, 2.0)));          // portico
+  vec3 c = vec3(abs(q.x) - 29.0, q.y, abs(q.z) - 23.0);                         // corner towers
+  d = min(d, sdBox(c - vec3(0.0, 22.0, 0.0), vec3(5.0, 22.0, 5.0)));
+  d = min(d, sdEll(c - vec3(0.0, 44.0, 0.0), vec3(5.0, 7.0, 5.0)));
+  d = min(d, sdCyl(c, 1.0, 44.0, 55.0));
+  d = min(d, sdCyl(q, 17.0, 31.0, 46.0));                                       // drum
+  d = min(d, sdEll(q - vec3(0.0, 46.0, 0.0), vec3(17.0, 25.0, 17.0)));          // dome
+  d = min(d, sdCyl(q, 3.5, 68.0, 77.0));                                        // lantern
+  d = min(d, sdEll(q - vec3(0.0, 77.0, 0.0), vec3(3.5, 4.0, 3.5)));
+  d = min(d, sdBox(q - vec3(0.0, 84.0, 0.0), vec3(1.0, 4.5, 1.0)));            // cross
+  d = min(d, sdBox(q - vec3(0.0, 85.5, 0.0), vec3(3.0, 1.0, 1.0)));
+  return d;
+}
+
+// Fernsehturm: the tapering shaft, the sphere (drawn larger than life), the antenna.
+float towerSdf(vec3 q) {
+  float bound = sdCyl(q, 32.0, -1.0, 372.0);
+  if (bound > 4.0) return bound;
+  float r = mix(14.0, 5.5, clamp(q.y / 250.0, 0.0, 1.0));
+  float d = max(length(q.xz) - r, max(-q.y, q.y - 250.0)) * 0.95;
+  d = min(d, length(q - vec3(0.0, 213.0, 0.0)) - 26.0);
+  d = min(d, sdCyl(q, 2.8, 250.0, 368.0));
+  return d;
+}
+
+// Plattenbau: a tall prefab slab with a lift housing and a mast, and a long low one.
+float slabSdf(vec3 q) {
+  float d = sdBox(q - vec3(0.0, 30.0, 0.0), vec3(40.0, 30.0, 7.0));
+  d = min(d, sdBox(q - vec3(-24.0, 61.5, 0.0), vec3(4.0, 1.5, 4.0)));
+  d = min(d, sdCyl(q - vec3(20.0, 0.0, 0.0), 0.8, 60.0, 72.0));
+  return d;
+}
+float lowSdf(vec3 q) { return sdBox(q - vec3(0.0, 8.0, 0.0), vec3(25.0, 8.0, 6.0)); }
+
+// Unter den Linden: a row of lime trees with leafy crowns that sway in the wind.
+vec3 TREES; float TREE_SPACING;
+float treesSdf(vec3 p) {
+  vec3 q = p - TREES;
+  float bound = sdBox(q - vec3(0.0, 9.0, 0.0), vec3(3.5 * TREE_SPACING + 8.0, 10.5, 8.0));
+  if (bound > 3.0) return bound;
+  float i = clamp(floor(q.x / TREE_SPACING + 0.5), -3.0, 3.0);
+  vec3 c = q - vec3(i * TREE_SPACING, 0.0, 0.0);
+  float sway = (0.3 + 0.9 * uWind) * sin(uTime * 0.6 + i * 1.7);
+  vec3 k = c - vec3(sway, 11.0, 0.0);
+  float leaves = 0.9 * sin(k.x * 1.3 + uTime * 0.3) * sin(k.y * 1.1 + i) * sin(k.z * 1.2);
+  float crown = (length(k * vec3(1.0, 1.2, 1.0)) - 5.4 + leaves) * 0.7;
+  return min(sdCyl(c, 0.6, 0.0, 7.5), crown);
+}
+
+// A tram crossing the foreground, every 58 seconds.
+float tramSdf(vec3 p) {
+  vec3 q = p - vec3(mod(uTime * 9.0, 520.0) - 260.0, 0.0, -70.0);
+  float d = sdBox(q - vec3(0.0, 2.2, 0.0), vec3(14.0, 1.8, 1.3)) - 0.2;
+  d = min(d, sdBox(q - vec3(0.0, 4.3, 0.0), vec3(1.6, 0.2, 0.5)));              // pantograph
+  return d;
+}
+
+// Materials: 1 ground, 2 tower, 3 gate, 4 Quadriga, 5 Dom, 6 tall slab, 7 low slab,
+// 8 trees, 9 tram.
+vec2 map(vec3 p) {
+  vec2 r = vec2(p.y, 1.0);
+  float d = towerSdf(p - TOWER);
+  if (d < r.x) r = vec2(d, 2.0);
+  if (uSolo < 0.5) {
+    d = gateSdf(p - GATE);     if (d < r.x) r = vec2(d, 3.0);
+    d = quadrigaSdf(p - GATE); if (d < r.x) r = vec2(d, 4.0);
+    d = domSdf(p - DOM);       if (d < r.x) r = vec2(d, 5.0);
+    d = slabSdf(p - SLAB);     if (d < r.x) r = vec2(d, 6.0);
+    d = lowSdf(p - LOW);       if (d < r.x) r = vec2(d, 7.0);
+  }
+  d = treesSdf(p); if (d < r.x) r = vec2(d, 8.0);
+  d = tramSdf(p);  if (d < r.x) r = vec2(d, 9.0);
+  return r;
+}
+
+const float FAR = 2500.0;
+
+vec2 march(vec3 ro, vec3 rd) {
+  float t = 1.0;
+  for (int i = 0; i < 140; i++) {
+    vec2 h = map(ro + rd * t);
+    if (h.x < 0.002 * t) return vec2(t, h.y);
+    t += h.x;
+    if (t > FAR) break;
+  }
+  // The far ground beyond the march still reads as ground; everything else is sky.
+  if (rd.y < 0.0) return vec2(-ro.y / rd.y, 1.0);
+  return vec2(FAR, 0.0);
+}
+
+vec3 normalAt(vec3 p, float t) {
+  vec2 e = vec2(1.0, -1.0) * max(0.01, 0.0012 * t);
+  return normalize(e.xyy * map(p + e.xyy).x + e.yyx * map(p + e.yyx).x +
+                   e.yxy * map(p + e.yxy).x + e.xxx * map(p + e.xxx).x);
+}
+
+float softShadow(vec3 ro, vec3 rd) {
+  float res = 1.0, t = 0.5;
+  for (int i = 0; i < 48; i++) {
+    float h = map(ro + rd * t).x;
+    res = min(res, 10.0 * h / t);
+    t += clamp(h, 0.4, 30.0);
+    if (res < 0.01 || t > 600.0) break;
+  }
+  return clamp(res, 0.0, 1.0);
+}
+
+float occlusion(vec3 p, vec3 n) {
+  float o = 0.0, s = 1.0;
+  for (int i = 1; i <= 4; i++) {
+    float h = 1.5 * float(i);
+    o += (h - map(p + n * h).x) * s;
+    s *= 0.6;
+  }
+  return clamp(1.0 - 0.08 * o, 0.0, 1.0);
+}
+
+// How strongly a surface takes the light: stone and concrete pale, glass, copper and bronze
+// darker, so each landmark reads as its own volume. No textures: the shape is the drawing.
+float albedo(float m, vec3 p) {
+  if (m < 2.5) {                                                // Fernsehturm: concrete, a steel sphere
+    vec3 q = p - TOWER;
+    return length(q - vec3(0.0, 213.0, 0.0)) < 26.6 ? 0.7 : (q.y > 250.0 ? 0.8 : 0.95);
+  }
+  if (m < 3.5) return 0.95;                                     // the gate's sandstone
+  if (m < 4.5) return 0.6;                                      // the Quadriga's bronze
+  if (m < 5.5) return (p - DOM).y > 44.0 ? 0.75 : 0.9;          // the Dom: copper domes, stone
+  if (m < 7.5) return 0.9;                                      // Plattenbau concrete
+  if (m < 8.5) return 0.75;                                     // leaves
+  return 0.95;                                                  // the tram's yellow
+}
+
+// Which glyph family prints a surface: 1 ground, 2 stone, 3 concrete, 4 metal, 5 leaves, 6 tram.
+float glyphClass(float m, vec3 p) {
+  if (m < 1.5) return 1.0;
+  if (m < 2.5) {
+    vec3 q = p - TOWER;
+    return length(q - vec3(0.0, 213.0, 0.0)) < 26.6 || q.y > 250.0 ? 4.0 : 3.0;
+  }
+  if (m < 3.5) return 2.0;
+  if (m < 4.5) return 4.0;
+  if (m < 5.5) return (p - DOM).y > 44.0 ? 4.0 : 2.0;
+  if (m < 7.5) return 3.0;
+  if (m < 8.5) return 5.0;
+  return 6.0;
+}
+
+// The sky, in screen space: always paper, with the sun, the clouds, the stars and the moon.
+float sky(vec2 p, float aspect, float t) {
   float lum = 1.0;
-
-
-  // Sun by day, moon by night: an outlined disc with craters.
-  float span = max(aspect, 1.6);                            // portrait screens: keep the sun's path wide
+  float span = max(aspect, 1.6);                                // portrait screens: keep the sun's path wide
   vec2 sun = vec2((uSun.x - 0.5) * span, uSun.y);
   float ds = length(p - sun);
   if (ds < 0.055) lum = mix(lum, ds > 0.045 ? 0.1 : 0.4, uDay);
   else if (ds < 0.1 && fract(atan(p.y - sun.y, p.x - sun.x) * 1.9 + t * 0.05) < 0.25) lum = mix(lum, 0.55, uDay * (1.0 - uClouds));
+
   // Clouds drift with the wind. Even overcast leaves gaps of open sky.
   float n = fbm(vec2(p.x * 2.5 + t * (0.015 + 0.08 * uWind), p.y * 5.0));
   float edge = mix(0.82, 0.5, uClouds);
   float cloud = smoothstep(edge, edge + 0.15, n);
-  float cloudLum = mix(0.5, 0.68, uDay) + 0.15 * (n - 0.5);
-  lum = mix(lum, cloudLum, cloud * 0.9);
+  lum = mix(lum, mix(0.5, 0.68, uDay) + 0.15 * (n - 0.5), cloud * 0.9);
 
   // Stars at night, twinkling in the gaps between clouds.
   float night = 1.0 - uDay;
@@ -108,172 +319,97 @@ float sky(vec2 p, vec2 m, float aspect, float t) {
 
   // The moon at night, in front of the clouds, in its real phase: the lit side stays paper
   // with a few craters, the dark side prints, and an outline holds the disc.
-  vec2 moon = vec2((uMoon.x - 0.5) * span, uMoon.y);
-  vec2 md = (p - moon) / 0.065;
+  float moonX = clamp((uMoon.x - 0.5) * span, -0.5 * aspect + 0.08, 0.5 * aspect - 0.08); // always in frame
+  vec2 md = (p - vec2(moonX, uMoon.y)) / 0.065;
   if (dot(md, md) < 1.0) {
     vec3 nrm = vec3(md, sqrt(1.0 - dot(md, md)));
     float phi = uMoonPhase * 6.2832;
     float lit = step(0.0, dot(nrm, vec3(sin(phi), 0.0, -cos(phi))));
-    float crater = step(0.6, noise(md * 3.0 + 4.0));
-    float face = mix(0.35, 0.82 - 0.35 * crater, lit);
+    float face = mix(0.35, 0.82 - 0.35 * step(0.6, noise(md * 3.0 + 4.0)), lit);
     lum = mix(lum, dot(md, md) > 0.68 ? 0.08 : face, night);
   }
-
-  // Lightning bleaches the clouds.
-  float flash = uStorm * step(0.965, hash(vec2(floor(t * 6.0), 1.7)));
-  lum = mix(lum, 1.0, flash * 0.85);
-
-  // A faint halo follows the cursor.
-  lum -= 0.18 * exp(-160.0 * dot(p - m, p - m));
   return lum;
 }
 
-// Snow settles on a flat roof ending at height top.
-float roof(float y, float top) { return step(top - 0.013, y) * step(0.25, uSnow); }
-
-float scene(vec2 uv) {
+void main() {
+  vec2 px = gl_FragCoord.xy * uCell / uSS;
+  vec2 suv = px / uRes;
   float aspect = uRes.x / uRes.y;
-  vec2 p = vec2((uv.x - 0.5) * aspect, uv.y);
-  vec2 m = vec2((uMouse.x - 0.5) * aspect, uMouse.y);
-  vec2 light = normalize(vec2(mix((uLightX - 0.5) * 2.0, (uMouse.x - 0.5) * 2.0, 0.4), 0.6));
-  float shade = mix(0.32, 1.0, uDay);                       // stone and concrete at night
   float t = uTime;
-  float y = p.y;
 
-  float lum = sky(p, m, aspect, t);
+  // The composition holds across widths: wider screens spread the landmarks apart.
+  float k = clamp(aspect / 1.9, 0.75, 1.4);
+  GATE = vec3(-69.0 * k, 0.0, -120.0);
+  DOM = vec3(-30.0 * k, 0.0, -300.0);
+  TOWER = vec3(uSolo > 0.5 ? 0.0 : 60.0 * k, 0.0, -450.0);
+  SLAB = vec3(118.0 * k, 0.0, -215.0);
+  LOW = vec3(50.0 * k, 0.0, -95.0);
+  TREES = vec3(uSolo > 0.5 ? 0.0 : -5.0 * k, 0.0, -175.0);
+  TREE_SPACING = 16.0 * k;
 
-  float par = (uMouse.x - 0.5) * 0.02;                      // background parallax
-  vec2 q = p + vec2(par, 0.0);
+  // Camera: the cursor turns and shifts it a little; it also drifts on its own.
+  float yaw = (uMouse.x - 0.5) * 0.05 + 0.012 * sin(t * 0.05);
+  float pitch = 0.31 + (uMouse.y - 0.5) * 0.03;
+  vec3 ro = vec3((uMouse.x - 0.5) * 14.0 + (uSolo > 0.5 ? 25.0 : 6.0) * sin(t * 0.04), 5.0, 0.0);
+  vec3 fw = vec3(sin(yaw) * cos(pitch), sin(pitch), -cos(yaw) * cos(pitch));
+  vec3 rt = normalize(vec3(cos(yaw), 0.0, sin(yaw)));
+  vec3 up = cross(rt, fw);
+  vec2 ndc = (suv * 2.0 - 1.0) * vec2(aspect, 1.0) * 0.4663; // 50° vertical field of view
+  vec3 rd = normalize(fw + ndc.x * rt + ndc.y * up);
 
-  // On narrow, portrait screens only the Fernsehturm stands, centred.
-  bool solo = aspect < 1.1;
-
-  if (!solo) {
-    // Berliner Dom, behind: a hall with arched windows, corner towers, a drum and the ribbed dome.
-    float dx0 = (0.33 - 0.5) * aspect, dx1 = (0.48 - 0.5) * aspect;
-    float dc = (dx0 + dx1) * 0.5, hw = (dx1 - dx0) * 0.5;
-    float dr = (q.x - dc) / hw;                               // -1..1 across the hall
-    if (abs(dr) < 1.0 && y > 0.06 && y < 0.3) {
-      vec2 g = vec2((dr + 1.0) * 7.0, (y - 0.06) * 18.0);
-      vec2 f = fract(g);
-      float arch = step(0.3, f.x) * step(f.x, 0.7) * step(0.2, f.y) * step(length(vec2(f.x - 0.5, (f.y - 0.62) * 1.2)), 0.22 + step(f.y, 0.62));
-      lum = arch > 0.0 ? mix(0.12, 0.9, step(mix(0.6, 0.95, uDay), hash(floor(g) + 9.0))) : (0.6 + 0.05 * noise(q * 60.0)) * shade;
-      if (fract(g.y) < 0.12) lum = 0.4 * shade;                 // cornices
-      lum = mix(lum, 0.97, roof(y, 0.3));
+  vec2 hit = march(ro, rd);
+  float lum, depth = 1.0, cls = 0.0;
+  float flash = uStorm * step(0.965, hash(vec2(floor(t * 6.0), 1.7)));
+  if (hit.y < 0.5) {
+    lum = mix(sky(vec2((suv.x - 0.5) * aspect, suv.y), aspect, t), 1.0, flash * 0.85);
+  } else {
+    vec3 p = ro + rd * hit.x;
+    vec3 n = hit.y < 1.5 ? vec3(0.0, 1.0, 0.0) : normalAt(p, hit.x);
+    cls = glyphClass(hit.y, p);
+    float day = uDay;
+    float sh = softShadow(p + n * 0.3, uLight);
+    if (hit.y < 1.5) {
+      // The ground stays paper; only the shadows the landmarks cast on it print.
+      lum = 1.0 - 0.45 * (1.0 - sh) * mix(0.6, 1.0, day);
+    } else {
+      // Solid volumes shaded by how they face the light, as dense glyphs: every surface
+      // prints something, the lit side light, the far side dense.
+      float diffuse = max(dot(n, uLight), 0.0) * sh;
+      float wrap = 0.5 + 0.5 * dot(n, uLight);                  // soft fall-off into the shade
+      float spec = pow(max(dot(reflect(-uLight, n), -rd), 0.0), 24.0) * sh;
+      // Light gathers towards the top of each volume and drains towards its base.
+      float rise = mix(0.72, 1.0, smoothstep(0.0, 40.0, p.y));
+      float light = (mix(0.2, 0.35, day) * wrap * occlusion(p, n) + mix(0.4, 0.55, day) * diffuse) * rise + 0.25 * spec;
+      float ink = 0.22 + 0.62 * (1.0 - clamp(albedo(hit.y, p) * light, 0.0, 1.0));
+      // The warning light on the antenna blinks.
+      if (hit.y < 2.5 && (p - TOWER).y > 362.0) ink = mix(0.05, 1.0, step(0.5, fract(t * 0.6)));
+      // Snow settles on whatever faces up.
+      ink = mix(ink, 0.12, smoothstep(0.55, 0.8, n.y) * smoothstep(0.15, 0.45, uSnow));
+      lum = 1.0 - ink;
     }
-    for (int i = 0; i < 2; i++) {                             // corner towers with small domes
-      float tx = dc + (i == 0 ? -0.88 : 0.88) * hw;
-      float tw = 0.12 * hw;
-      if (abs(q.x - tx) < tw && y > 0.06 && y < 0.38) lum = (0.5 + 0.2 * light.x * sign(q.x - tx)) * shade;
-      vec2 td = vec2((q.x - tx) / tw, (y - 0.38) / 0.03);
-      if (td.y > 0.0 && dot(td, td) < 1.0) lum = (0.25 + 0.25 * max(0.0, td.x * light.x + 0.5)) * shade;
-      if (abs(q.x - tx) < 0.003 && y > 0.4 && y < 0.43) lum = 0.1;
-    }
-    if (abs(dr) < 0.6 && y > 0.3 && y < 0.39) {               // drum with columns
-      lum = (fract(dr * 9.0) < 0.3 ? 0.3 : 0.62) * shade;
-      if (y > 0.375) lum = 0.35 * shade;
-    }
-    vec2 dd = vec2(dr / 0.62, (y - 0.39) / 0.13);
-    if (dd.y > 0.0 && dot(dd, dd) < 1.0) {                    // the dome, lit from the side, with ribs
-      float nz = sqrt(max(0.0, 1.0 - dot(dd, dd)));
-      lum = (0.12 + 0.55 * max(0.0, dot(normalize(vec3(dd.x, dd.y, nz)), normalize(vec3(light, 0.9))))) * mix(0.5, 1.0, uDay);
-      if (fract(atan(dd.x, nz) * 2.6) < 0.12) lum *= 0.5;
-      lum = mix(lum, 0.97, step(0.25, uSnow) * step(0.75, dd.y) * 0.8);
-    }
-    if (abs(q.x - dc) < 0.1 * hw && y > 0.505 && y < 0.55) lum = 0.3 * shade; // lantern
-    if (abs(q.x - dc) < 0.003 && y > 0.55 && y < 0.6) lum = 0.1;               // cross
-    if (abs(q.x - dc) < 0.012 && abs(y - 0.585) < 0.003) lum = 0.1;
-
-    // Plattenbau, right: a tall prefab slab behind a long low one with balcony bands.
-    float ax0 = (0.72 - 0.5) * aspect, ax1 = (0.97 - 0.5) * aspect;
-    if (box(q, vec2(ax0, 0.06), vec2(ax1, 0.47)) > 0.0) {
-      lum = facade(q - vec2(ax0, 0.06), vec2(48.0, 30.0), 0.62, 3.0, shade);
-      if (fract((q.x - ax0) * 6.0) < 0.04) lum = 0.35 * shade;   // panel joints
-      lum = mix(lum, 0.97, roof(y, 0.47));
-    }
-    if (abs(q.x - (ax0 + ax1) * 0.5) < 0.003 && y > 0.47 && y < 0.56) lum = 0.15; // rooftop mast
-    float bx0 = (0.67 - 0.5) * aspect, bx1 = (0.88 - 0.5) * aspect;
-    if (box(p, vec2(bx0, 0.06), vec2(bx1, 0.26)) > 0.0) {
-      vec2 f = fract((p - vec2(bx0, 0.06)) * vec2(30.0, 25.0));
-      lum = facade(p - vec2(bx0, 0.06), vec2(30.0, 25.0), 0.55, 4.0, shade);
-      if (f.y < 0.3) lum = (0.3 + 0.1 * step(0.5, fract(p.x * 9.0))) * shade; // balcony bands
-      lum -= 0.15 * smoothstep(bx1 - 0.05, bx1, p.x) * max(0.0, -light.x) * shade;
-      lum = mix(lum, 0.97, roof(y, 0.26));
-    }
-
-    // Brandenburger Tor, left: six columns, the entablature, the attic and the Quadriga.
-    float gx0 = (0.05 - 0.5) * aspect, gx1 = (0.3 - 0.5) * aspect, gw = gx1 - gx0;
-    float gc = (gx0 + gx1) * 0.5;
-    for (int i = 0; i < 2; i++) {                             // the guardhouses at either side
-      float hx = i == 0 ? gx0 - 0.1 * gw : gx1 + 0.1 * gw;
-      if (abs(p.x - hx) < 0.08 * gw && y > 0.06 && y < 0.2) {
-        lum = 0.62 * shade;
-        if (fract((p.x - hx) / gw * 25.0) < 0.5 && y > 0.1 && y < 0.16) lum = 0.25 * shade;
-        lum = mix(lum, 0.97, roof(y, 0.2));
-      }
-    }
-    if (p.x > gx0 && p.x < gx1 && y > 0.06 && y < 0.3) {
-      float f = (p.x - gx0) / gw * 5.0;                       // five passages, six columns
-      float c = f - floor(f + 0.5);
-      float w = 0.18 + 0.06 * step(0.28, y);                  // capitals flare at the top
-      if (abs(c) < w || y < 0.075) lum = (0.42 + 0.25 * (c / w) * light.x) * shade;
-    }
-    if (p.x > gx0 - 0.01 && p.x < gx1 + 0.01 && y >= 0.3 && y < 0.36) {
-      lum = 0.55 * shade;
-      if (y > 0.315 && y < 0.34) lum = (fract((p.x - gx0) / gw * 30.0) < 0.35 ? 0.2 : 0.6) * shade; // triglyphs
-      if (y > 0.35) lum = 0.3 * shade;
-    }
-    if (abs(p.x - gc) < 0.36 * gw && y >= 0.36 && y < 0.4) {
-      lum = abs(p.x - gc) > 0.33 * gw || y > 0.39 ? 0.3 * shade : 0.6 * shade; // attic
-      lum = mix(lum, 0.97, roof(y, 0.4));
-    }
-    vec2 hq = vec2((p.x - gc) / (0.11 * gw), (y - 0.4) / 0.04);
-    if (abs(hq.x) < 1.0 && hq.y > 0.0 && hq.y < 1.0) {          // four horses: legs, bodies, raised heads
-      float lane = fract((hq.x + 1.0) * 2.0);
-      float body = step(0.45, hq.y) * step(hq.y, 0.8) * step(0.1, lane) * step(lane, 0.9);
-      float legs = step(hq.y, 0.45) * step(0.5, fract(lane * 3.0));
-      float head = step(0.8, hq.y) * step(lane, 0.3);
-      if (body + legs + head > 0.0) lum = 0.12;
-    }
-    if (abs(p.x - gc) < 0.004 && y > 0.44 && y < 0.5) lum = 0.1;      // Victoria and her staff
-    if (abs(p.x - gc) < 0.012 && y > 0.43 && y < 0.465) lum = 0.12;
-    if (abs(length(vec2(p.x - gc, y - 0.507)) - 0.008) < 0.003) lum = 0.1; // the wreath
+    lum = mix(lum, 1.0, flash * 0.5);
+    // Distance fades into the paper: a little always, a lot in fog.
+    lum = mix(lum, 1.0, 1.0 - exp(-hit.x * (0.0003 + 0.006 * uFog)));
+    depth = log(1.0 + hit.x) / log(1.0 + FAR);
   }
-
-  // Fernsehturm: shaft, sphere with panel grid, upper shaft and striped antenna.
-  float cx = solo ? 0.0 : 0.1 * aspect;
-  float w = mix(0.03, 0.016, smoothstep(0.06, 0.6, y));
-  if (abs(p.x - cx) < w && y > 0.06 && y < 0.62) {
-    float n = (p.x - cx) / w;
-    lum = 0.08 + 0.4 * shade * max(0.0, n * light.x + sqrt(max(0.0, 1.0 - n * n)) * 0.4);
-  }
-  vec2 sc = vec2(cx, 0.66);
-  float r = 0.075;
-  vec2 d = p - sc;
-  if (dot(d, d) < r * r) {
-    vec3 nrm = vec3(d / r, sqrt(max(0.0, 1.0 - dot(d, d) / (r * r))));
-    float diff = max(0.0, dot(nrm, normalize(vec3(light, 0.8))));
-    lum = 0.04 + 0.7 * diff * mix(0.45, 1.0, uDay);
-    float lat = fract(asin(nrm.y) * 6.0), lon = fract(atan(nrm.x, nrm.z) * 5.0 + t * 0.05);
-    if (lat < 0.08 || lon < 0.08) lum *= 0.55;               // facets
-  }
-  if (abs(p.x - cx) < 0.042 && abs(y - 0.6) < 0.01) lum = 0.1; // platform ring
-  if (abs(p.x - cx) < 0.011 && y > 0.72 && y < 0.82) lum = 0.15;
-  if (abs(p.x - cx) < 0.005 && y > 0.82 && y < 0.95) lum = fract(y * 40.0) < 0.5 ? 0.05 : 0.5;
-  float blink = step(0.5, fract(t * 0.6));
-  if (dot(p - vec2(cx, 0.955), p - vec2(cx, 0.955)) < 0.00004) lum = mix(0.9, 0.05, blink);
-
-  // Ground: darker when wet, white under snow.
-  if (y < 0.06) {
-    lum = (0.55 + 0.2 * noise(vec2(p.x * 30.0, y * 80.0))) * mix(0.65, 1.0, uDay) * (1.0 - 0.35 * uRain);
-    lum = mix(lum, 0.95 - 0.08 * noise(p * 90.0), smoothstep(0.1, 0.4, uSnow));
-  }
-
-  // Fog fades the scene into the paper, more so higher up.
-  lum = mix(lum, 1.0, uFog * (0.35 + 0.45 * smoothstep(0.0, 0.7, y)));
-
-  return clamp(lum, 0.0, 1.0);
+  gl_FragColor = vec4(clamp(lum, 0.0, 1.0), depth, cls / 16.0, 1.0);
 }
+`;
+
+// The print pass: one glyph per character cell from the averaged scene.
+const PRINT = `${COMMON}
+uniform vec2 uCells;      // character grid size
+uniform float uCell;
+uniform float uGlyphs;
+uniform float uAtlasGlyphs;
+uniform float uFamilies;  // atlas index of the first glyph family
+uniform sampler2D uAtlas;
+uniform sampler2D uScene;
+uniform vec3 uInk;
+uniform vec3 uPaper;
+
+// Bilinear sampling at the centre of a cell averages its rays.
+vec4 cellAt(vec2 c) { return texture2D(uScene, (c + 0.5) / uCells); }
 
 // Precipitation, in character cells: streaks of rain slanted by the wind, swaying snow.
 float rainAt(vec2 c) {
@@ -293,16 +429,38 @@ float snowAt(vec2 c) {
   return on * step(fract(y / period) * period, 1.0);
 }
 
+const float VERTICAL = 0.0, BACKSLASH = 1.0, SNOW = 2.0, SLASH = 3.0, DASH = 5.0;
+const float FAMILY = 6.0; // glyphs per family
+
+// The glyph family of a cell, from one of its rays: averaging would blend families at edges.
+float classAt(vec2 c) { return floor(texture2D(uScene, (c + 0.25) / uCells).b * 16.0 + 0.5); }
+bool skyAt(vec2 c) { return cellAt(c).g > 0.995; }
+
 void main() {
   vec2 frag = gl_FragCoord.xy;
   vec2 cell = floor(frag / uCell);
-  vec2 uv = (cell + 0.5) * uCell / uRes;
-  float ink = 1.0 - scene(uv);
+  vec4 s = cellAt(cell);
+  float ink = 1.0 - s.r;
   float idx = floor(clamp(ink, 0.0, 0.999) * uGlyphs);
+  float cls = classAt(cell);
+  if (cls > 1.5) {
+    // Each surface prints in its own family: stone - = #, concrete : ; +, metal o O 0, leaves
+    // . : * + o, the tram $ &.
+    idx = uFamilies + (cls - 2.0) * FAMILY + floor(clamp(ink, 0.0, 0.999) * FAMILY);
+    // Where a building meets the sky, its edge prints along its direction.
+    bool l = skyAt(cell + vec2(-1.0, 0.0)), r = skyAt(cell + vec2(1.0, 0.0));
+    bool u = skyAt(cell + vec2(0.0, 1.0)), d = skyAt(cell + vec2(0.0, -1.0));
+    if (cls < 4.5 && (l || r || u) && !(l && r)) {
+      if (u && !l && !r) idx = DASH;
+      else if (!u && (l || r)) idx = uGlyphs + VERTICAL;
+      else idx = uGlyphs + (u && l ? SLASH : BACKSLASH);
+    }
+  }
+
   // Rain and snow show against the sky and light walls; dark cells would swallow them.
-  if (uv.y > 0.06 && ink < 0.72) {
-    if (snowAt(cell) > 0.0) idx = uGlyphs + 2.0;
-    else if (rainAt(cell) > 0.0) idx = uGlyphs + (uWind > 0.25 ? 1.0 : 0.0);
+  if (ink < 0.72) {
+    if (snowAt(cell) > 0.0) idx = uGlyphs + SNOW;
+    else if (rainAt(cell) > 0.0) idx = uGlyphs + (uWind > 0.25 ? BACKSLASH : VERTICAL);
   }
   vec2 local = fract(frag / uCell);
   float a = texture2D(uAtlas, vec2((idx + local.x) / uAtlasGlyphs, 1.0 - local.y)).r;
@@ -317,11 +475,24 @@ function compile(gl: WebGLRenderingContext, type: number, source: string): WebGL
   if (!shader) return null;
   gl.shaderSource(shader, source);
   gl.compileShader(shader);
-  return gl.getShaderParameter(shader, gl.COMPILE_STATUS) ? shader : null;
+  if (gl.getShaderParameter(shader, gl.COMPILE_STATUS)) return shader;
+  console.warn('[ascii-hero] shader did not compile:', gl.getShaderInfoLog(shader));
+  return null;
+}
+
+function link(gl: WebGLRenderingContext, fragment: string): WebGLProgram | null {
+  const vs = compile(gl, gl.VERTEX_SHADER, VERTEX);
+  const fs = compile(gl, gl.FRAGMENT_SHADER, fragment);
+  const program = gl.createProgram();
+  if (!vs || !fs || !program) return null;
+  gl.attachShader(program, vs);
+  gl.attachShader(program, fs);
+  gl.linkProgram(program);
+  return gl.getProgramParameter(program, gl.LINK_STATUS) ? program : null;
 }
 
 function atlas(cell: number): HTMLCanvasElement {
-  const glyphs = [...RAMP, ...EXTRA];
+  const glyphs = [...RAMP, ...EXTRA, ...FAMILIES];
   const canvas = document.createElement('canvas');
   canvas.width = cell * glyphs.length;
   canvas.height = cell;
@@ -334,6 +505,16 @@ function atlas(cell: number): HTMLCanvasElement {
   ctx.textBaseline = 'middle';
   glyphs.forEach((glyph, i) => ctx.fillText(glyph, (i + 0.5) * cell, cell * 0.55));
   return canvas;
+}
+
+function texture(gl: WebGLRenderingContext): WebGLTexture | null {
+  const tex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  return tex;
 }
 
 function showFallback(root: HTMLElement, canvas: HTMLCanvasElement) {
@@ -363,59 +544,73 @@ export function initAsciiHero() {
   const canvas = root.querySelector('canvas');
   if (!canvas) return;
   const gl = canvas.getContext('webgl', { antialias: false, alpha: false });
-  const vs = gl && compile(gl, gl.VERTEX_SHADER, VERTEX);
-  const fs = gl && compile(gl, gl.FRAGMENT_SHADER, FRAGMENT);
-  const program = gl?.createProgram();
-  if (!gl || !vs || !fs || !program) return showFallback(root, canvas);
-  gl.attachShader(program, vs);
-  gl.attachShader(program, fs);
-  gl.linkProgram(program);
-  if (!gl.getProgramParameter(program, gl.LINK_STATUS)) return showFallback(root, canvas);
-  gl.useProgram(program);
+  const scene = gl && link(gl, SCENE);
+  const print = gl && link(gl, PRINT);
+  const framebuffer = gl?.createFramebuffer();
+  if (!gl || !scene || !print || !framebuffer) return showFallback(root, canvas);
 
   gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
   gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
-  const aPos = gl.getAttribLocation(program, 'aPos');
-  gl.enableVertexAttribArray(aPos);
-  gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
+  for (const program of [scene, print]) {
+    const aPos = gl.getAttribLocation(program, 'aPos');
+    gl.enableVertexAttribArray(aPos);
+    gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
+  }
 
-  const u = (name: string) => gl.getUniformLocation(program, name);
-  const uRes = u('uRes'), uTime = u('uTime'), uMouse = u('uMouse'), uCell = u('uCell');
-  const uDay = u('uDay'), uSun = u('uSun'), uMoon = u('uMoon'), uLightX = u('uLightX');
-  const uMoonPhase = u('uMoonPhase');
-  const weatherUniforms = {
-    clouds: u('uClouds'),
-    rain: u('uRain'),
-    snow: u('uSnow'),
-    fog: u('uFog'),
-    storm: u('uStorm'),
-    wind: u('uWind'),
-  } satisfies Record<keyof SkyWeather, WebGLUniformLocation | null>;
-  gl.uniform1f(u('uGlyphs'), RAMP.length);
-  gl.uniform1f(u('uAtlasGlyphs'), RAMP.length + EXTRA.length);
-  gl.uniform3fv(u('uInk'), INK);
-  gl.uniform3fv(u('uPaper'), PAPER);
-  gl.uniform1i(u('uAtlas'), 0);
-  const texture = gl.createTexture();
-  gl.bindTexture(gl.TEXTURE_2D, texture);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  const uniforms = <T extends string>(program: WebGLProgram, names: readonly T[]) =>
+    Object.fromEntries(names.map((name) => [name, gl.getUniformLocation(program, name)])) as Record<
+      T,
+      WebGLUniformLocation | null
+    >;
+  const WEATHER = { clouds: 'uClouds', rain: 'uRain', snow: 'uSnow', fog: 'uFog', storm: 'uStorm', wind: 'uWind' } as const;
+  const su = uniforms(scene, [
+    'uRes', 'uCell', 'uSS', 'uMouse', 'uSolo', 'uTime', 'uDay', 'uSun', 'uMoon', 'uMoonPhase', 'uLight',
+    ...Object.values(WEATHER),
+  ] as const);
+  const pu = uniforms(print, [
+    'uCells', 'uCell', 'uGlyphs', 'uAtlasGlyphs', 'uFamilies', 'uAtlas', 'uScene', 'uInk', 'uPaper', 'uTime', 'uRain', 'uSnow', 'uWind',
+  ] as const);
+
+  gl.useProgram(print);
+  gl.uniform1f(pu.uGlyphs, RAMP.length);
+  gl.uniform1f(pu.uAtlasGlyphs, RAMP.length + EXTRA.length + FAMILIES.length);
+  gl.uniform1f(pu.uFamilies, RAMP.length + EXTRA.length);
+  gl.uniform3fv(pu.uInk, INK);
+  gl.uniform3fv(pu.uPaper, PAPER);
+  gl.uniform1i(pu.uAtlas, 0);
+  gl.uniform1i(pu.uScene, 1);
+  gl.activeTexture(gl.TEXTURE0);
+  const glyphs = texture(gl);
+  gl.activeTexture(gl.TEXTURE1);
+  const rendered = texture(gl);
 
   let cell = 0;
+  let cols = 0;
+  let rows = 0;
+  let solo = false;
+  let ok = true;
   const resize = () => {
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
     canvas.width = Math.max(1, Math.round(canvas.clientWidth * dpr));
     canvas.height = Math.max(1, Math.round(canvas.clientHeight * dpr));
-    gl.viewport(0, 0, canvas.width, canvas.height);
     const next = Math.round(CELL_CSS_PX * dpr);
     if (next !== cell) {
       cell = next;
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, glyphs);
       gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, atlas(cell));
     }
-    gl.uniform2f(uRes, canvas.width, canvas.height);
-    gl.uniform1f(uCell, cell);
+    cols = Math.ceil(canvas.width / cell);
+    rows = Math.ceil(canvas.height / cell);
+    solo = canvas.width / canvas.height < SOLO_BELOW_ASPECT;
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, rendered);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, cols * SUPERSAMPLE, rows * SUPERSAMPLE, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, rendered, 0);
+    ok = gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    if (!ok) showFallback(root, canvas);
   };
 
   const preview = overrides(window.location.search);
@@ -424,25 +619,48 @@ export function initAsciiHero() {
   const weather: SkyWeather = { ...CALM_SKY };
   let target: SkyWeather = { ...CALM_SKY };
 
-  const mouse = { x: 0.6, y: 0.7 };
-  const pointer = { x: 0.6, y: 0.7 };
+  const mouse = { x: 0.5, y: 0.5 };
+  const pointer = { x: 0.5, y: 0.5 };
   const still = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   const start = performance.now();
   const draw = () => {
-    mouse.x += (pointer.x - mouse.x) * 0.08;
-    mouse.y += (pointer.y - mouse.y) * 0.08;
+    if (!ok) return;
+    mouse.x += (pointer.x - mouse.x) * 0.06;
+    mouse.y += (pointer.y - mouse.y) * 0.06;
+    const time = still ? 0 : (performance.now() - start) / 1000;
     const clock = skyClock(now());
     for (const key of Object.keys(weather) as (keyof SkyWeather)[]) {
       weather[key] = still ? target[key] : weather[key] + (target[key] - weather[key]) * 0.02;
-      gl.uniform1f(weatherUniforms[key], weather[key]);
     }
-    gl.uniform1f(uDay, clock.day);
-    gl.uniform2f(uSun, ...clock.sun);
-    gl.uniform2f(uMoon, ...clock.moon);
-    gl.uniform1f(uMoonPhase, clock.moonPhase);
-    gl.uniform1f(uLightX, clock.lightX);
-    gl.uniform1f(uTime, still ? 0 : (performance.now() - start) / 1000);
-    gl.uniform2f(uMouse, mouse.x, mouse.y);
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
+    gl.viewport(0, 0, cols * SUPERSAMPLE, rows * SUPERSAMPLE);
+    gl.useProgram(scene);
+    gl.uniform2f(su.uRes, canvas.width, canvas.height);
+    gl.uniform1f(su.uCell, cell);
+    gl.uniform1f(su.uSS, SUPERSAMPLE);
+    gl.uniform2f(su.uMouse, mouse.x, mouse.y);
+    gl.uniform1f(su.uSolo, solo ? 1 : 0);
+    gl.uniform1f(su.uTime, time);
+    gl.uniform1f(su.uDay, clock.day);
+    gl.uniform2f(su.uSun, ...clock.sun);
+    gl.uniform2f(su.uMoon, ...clock.moon);
+    gl.uniform1f(su.uMoonPhase, clock.moonPhase);
+    gl.uniform3f(su.uLight, ...clock.light);
+    for (const [key, name] of Object.entries(WEATHER) as [keyof SkyWeather, (typeof WEATHER)[keyof SkyWeather]][]) {
+      gl.uniform1f(su[name], weather[key]);
+    }
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, canvas.width, canvas.height);
+    gl.useProgram(print);
+    gl.uniform2f(pu.uCells, cols, rows);
+    gl.uniform1f(pu.uCell, cell);
+    gl.uniform1f(pu.uTime, time);
+    gl.uniform1f(pu.uRain, weather.rain);
+    gl.uniform1f(pu.uSnow, weather.snow);
+    gl.uniform1f(pu.uWind, weather.wind);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
   };
 

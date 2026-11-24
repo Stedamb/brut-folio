@@ -57,13 +57,30 @@ const smoothstep = (lo: number, hi: number, x: number) => {
   return t * t * (3 - 2 * t);
 };
 
-/** A point of the sky in the hero, in 0–1 coordinates. The view faces south-southwest: east is left. */
+/** The hero looks south-southwest. Facing 20° west of south keeps the midday sun clear of the TV tower. */
+const VIEW_AZIMUTH = 200;
+
+/** Degrees from the view direction, -180–180: negative is left (east). */
+const fromView = (azimuth: number) => ((((azimuth - VIEW_AZIMUTH) % 360) + 540) % 360) - 180;
+
+/** Where a disc is drawn in the sky, in 0–1 screen coordinates. */
 function skyPoint(azimuth: number, elevation: number): [number, number] {
-  const fromSouth = ((((azimuth - 180) % 360) + 540) % 360) - 180;
   // Low suns are lifted, so Berlin's winter sun clears the rooftops.
   const height = Math.sign(elevation) * (Math.abs(elevation) / 62) ** 0.35;
-  // Facing 20° west of south keeps the midday sun clear of the TV tower's sphere.
-  return [0.5 + (fromSouth - 20) / 150, 0.14 + 0.82 * height];
+  return [0.5 + fromView(azimuth) / 150, 0.14 + 0.82 * height];
+}
+
+/**
+ * Direction toward a light in the hero's 3D scene (x right, y up, z toward the viewer).
+ * It keeps the light's side and height but comes from the viewer's side of the skyline, so the
+ * façades catch it rather than being backlit all day; never lower than 4°, so it never lights from below.
+ */
+export function lightDirection(azimuth: number, elevation: number): [number, number, number] {
+  const side = fromView(azimuth) * RAD;
+  const up = Math.max(4, elevation) * RAD;
+  const v: [number, number, number] = [Math.sin(side) * Math.cos(up), Math.sin(up), 0.5 * Math.cos(up)];
+  const length = Math.hypot(...v);
+  return [v[0] / length, v[1] / length, v[2] / length];
 }
 
 /** Time of day in the scene. */
@@ -75,18 +92,24 @@ export interface SkyClock {
   moon: [number, number];
   /** The moon's real phase: 0 new, 0.25 first quarter, 0.5 full, 0.75 last quarter. */
   moonPhase: number;
-  /** Horizontal position of whichever light is up, 0–1. */
-  lightX: number;
+  /** Direction toward whichever light is up, sun or moon, in the 3D scene. */
+  light: [number, number, number];
 }
 
 export function skyClock(date: Date): SkyClock {
   const { elevation, azimuth } = sunPosition(date);
   const sun = skyPoint(azimuth, elevation);
   // The moon crosses opposite the sun, squeezed into the frame and kept high in the sky.
-  const [moonX, moonY] = skyPoint(azimuth + 180, 18 + 0.35 * Math.max(0, -elevation));
+  const moonElevation = 18 + 0.35 * Math.max(0, -elevation);
+  const [moonX, moonY] = skyPoint(azimuth + 180, moonElevation);
   const moon: [number, number] = [0.5 + Math.max(-0.38, Math.min(0.38, (moonX - 0.5) / 2)), moonY];
   const day = smoothstep(-6, 3, elevation);
-  return { day, sun, moon, moonPhase: moonPhase(date), lightX: moon[0] + (sun[0] - moon[0]) * day };
+  const sunLight = lightDirection(azimuth, elevation);
+  const moonLight = lightDirection(azimuth + 180, moonElevation);
+  const mixed = sunLight.map((s, i) => moonLight[i] + (s - moonLight[i]) * day);
+  const length = Math.hypot(...mixed) || 1;
+  const light = mixed.map((c) => c / length) as [number, number, number];
+  return { day, sun, moon, moonPhase: moonPhase(date), light };
 }
 
 const SYNODIC_MONTH = 29.530588853;
