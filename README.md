@@ -9,7 +9,7 @@ A photography portfolio built with [Payload CMS](https://payloadcms.com) and [As
 - **Form builder**: the contact form is a Payload form, and submissions are stored in the CMS.
 - **MCP**: an MCP endpoint lets an AI client such as Claude Code read content and draft changes.
 
-The public site is plain Astro with no UI framework: server-rendered pages, cached on the CDN and purged by tag when content is published. The homepage hero is an ASCII skyline (a brutalist block and Berlin's TV tower) drawn by a WebGL shader. The admin and API live in a separate Payload app.
+The public site is plain Astro with no UI framework: server-rendered pages, cached on the CDN and purged by tag when content is published. The homepage hero is an ASCII skyline of Berlin (the Brandenburger Tor, the Dom, the Fernsehturm and Plattenbau) drawn by a WebGL shader, with a sky that follows the time of day and the current weather in Berlin. The admin and API live in a separate Payload app.
 
 **Live site:** https://brut-folio.vercel.app | **Admin:** https://minimal-portfolio-cms.vercel.app/admin
 
