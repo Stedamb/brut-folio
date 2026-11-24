@@ -366,10 +366,12 @@ void main() {
   TREE_SPACING = 16.0 * k;
   TRAM_X = uSolo > 0.5 ? -8.0 : -13.0 * k;                       // between two lime trees
 
-  // Camera: the cursor turns and shifts it a little; it also drifts on its own.
+  // Camera: a slow dolly into the scene, rising a little like a crane, then back out, eased
+  // at both ends so the 100-second loop never jumps. The cursor turns and shifts it a little.
+  float dolly = 0.5 - 0.5 * cos(t * 3.14159 / 50.0);
   float yaw = (uMouse.x - 0.5) * 0.05 + 0.012 * sin(t * 0.05);
-  float pitch = 0.31 + (uMouse.y - 0.5) * 0.03;
-  vec3 ro = vec3((uMouse.x - 0.5) * 14.0 + (uSolo > 0.5 ? 25.0 : 6.0) * sin(t * 0.04), 5.0, 0.0);
+  float pitch = 0.31 + 0.025 * dolly + (uMouse.y - 0.5) * 0.03;
+  vec3 ro = vec3((uMouse.x - 0.5) * 14.0 + (uSolo > 0.5 ? 25.0 : 6.0) * sin(t * 0.04), 5.0 + 4.0 * dolly, -65.0 * dolly);
   vec3 fw = vec3(sin(yaw) * cos(pitch), sin(pitch), -cos(yaw) * cos(pitch));
   vec3 rt = normalize(vec3(cos(yaw), 0.0, sin(yaw)));
   vec3 up = cross(rt, fw);
