@@ -1,0 +1,35 @@
+---
+// Prototype: Berlin as a tilt-shift ASCII diorama, a candidate for the homepage hero.
+// Not linked from the site and not indexed.
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex" />
+    <title>Berlin diorama</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: #050505;
+      }
+      [data-diorama] {
+        position: fixed;
+        inset: 0;
+      }
+    </style>
+  </head>
+  <body>
+    <div data-diorama></div>
+    <script>
+      import { initDiorama } from '../../scripts/diorama/main.js';
+
+      const host = document.querySelector<HTMLElement>('[data-diorama]');
+      if (host) initDiorama(host).catch((error) => console.error('[diorama]', error));
+    </script>
+  </body>
+</html>
