@@ -1,4 +1,4 @@
-# Minimal Portfolio
+# brut-folio
 
 A photography portfolio built with [Payload CMS](https://payloadcms.com) and [Astro](https://astro.build). It is the owner's real site, and it doubles as a worked example of what Payload can do for a small editorial site:
 
